@@ -9,6 +9,72 @@ from keras.utils import multi_gpu_model
 
 from Hypers import *
 
+class LNEG(Layer):
+ 
+    def __init__(self, nb_head, size_per_head, **kwargs):
+        self.nb_head = nb_head
+        self.size_per_head = size_per_head
+        self.output_dim = nb_head*size_per_head
+        super(LNEG, self).__init__(**kwargs)
+ 
+    def build(self, input_shape):
+        self.WQ = self.add_weight(name='WQ',
+                                  shape=(input_shape[0][-1], self.output_dim),
+                                  initializer='glorot_uniform',
+                                  trainable=True)
+        self.WK = self.add_weight(name='WK',
+                                  shape=(input_shape[1][-1], self.output_dim),
+                                  initializer='glorot_uniform',
+                                  trainable=True)
+        self.WV = self.add_weight(name='WV',
+                                  shape=(input_shape[2][-1], self.output_dim),
+                                  initializer='glorot_uniform',
+                                  trainable=True)
+        super(LNEG, self).build(input_shape)
+ 
+    def Mask(self, inputs, seq_len, mode='mul'):
+        if seq_len == None:
+            return inputs
+        else:
+            mask = K.one_hot(seq_len[:,0], K.shape(inputs)[1])
+            mask = 1 - K.cumsum(mask, 1)
+            for _ in range(len(inputs.shape)-2):
+                mask = K.expand_dims(mask, 2)
+            if mode == 'mul':
+                return inputs * mask
+            if mode == 'add':
+                return inputs - (1 - mask) * 1e12
+ 
+    def call(self, x, M):
+        if len(x) == 3:
+            Q_seq,K_seq,V_seq = x
+            Q_len,V_len = None,None
+        elif len(x) == 5:
+            Q_seq,K_seq,V_seq,Q_len,V_len = x
+        
+        Q_seq = K.dot(Q_seq, self.WQ)
+        Q_seq = K.reshape(Q_seq, (-1, K.shape(Q_seq)[1], self.nb_head, self.size_per_head))
+        Q_seq = K.permute_dimensions(Q_seq, (0,2,1,3))
+
+        K_seq = K.dot(K_seq, self.WK)
+        K_seq = K.reshape(K_seq, (-1, K.shape(K_seq)[1], self.nb_head, self.size_per_head))
+        K_seq = K.permute_dimensions(K_seq, (0,2,1,3))
+        V_seq = K.dot(V_seq, self.WV)
+        V_seq = K.reshape(V_seq, (-1, K.shape(V_seq)[1], self.nb_head, self.size_per_head))
+        V_seq = K.permute_dimensions(V_seq, (0,2,1,3))
+
+        A = K.batch_dot(Q_seq, K_seq, axes=[3,3]) / self.size_per_head**0.5
+        A = K.permute_dimensions(A, (0,3,2,1))
+        A = self.Mask(A, V_len, 'add')
+        A = K.permute_dimensions(A, (0,3,2,1))
+        A = K.softmax(A) * M
+
+        O_seq = K.batch_dot(A, V_seq, axes=[3,2])
+        O_seq = K.permute_dimensions(O_seq, (0,2,1,3))
+        O_seq = K.reshape(O_seq, (-1, K.shape(O_seq)[1], self.output_dim))
+        O_seq = self.Mask(O_seq, Q_len, 'mul')
+        return O_seq
+
 
 class Attention(Layer):
  
@@ -313,6 +379,46 @@ def news_level_pooling():
     
     return Model(vecs_input,vec)
 
+def get_user_encoder_inter(title_word_embedding_matrix,category_dict):
+
+    sentence_input = Input(shape=(MAX_INTER,), dtype='int32')
+    
+
+    title_word_embedding_layer = Embedding(title_word_embedding_matrix.shape[0], title_word_embedding_matrix.shape[1], weights=[title_word_embedding_matrix],trainable=True)
+    word_vecs = title_word_embedding_layer(sentence_input)
+    droped_vecs = Dropout(0.2)(word_vecs)
+    word_rep = Attention(20,20)([droped_vecs]*3)
+    droped_rep = Dropout(0.2)(word_rep)
+    interest_vec = AttentivePooling(MAX_INTER,400)(droped_rep)
+    
+
+    vec = Dense(50)(interest_vec)
+    
+    vec = keras.layers.RepeatVector(MAX_CLICK)(vec)
+    
+    sentEncodert = Model(sentence_input, vec)
+    return sentEncodert
+
+
+def get_entity_encoder_inter(title_word_embedding_matrix,category_dict):
+
+    sentence_input = Input(shape=(MAX_ENT,), dtype='int32')
+    mask = Input(shape=(MAX_ENT, MAX_ENT,), dtype='float32')
+    
+
+    title_word_embedding_layer = Embedding(title_word_embedding_matrix.shape[0], title_word_embedding_matrix.shape[1], weights=[title_word_embedding_matrix],trainable=True)
+    word_vecs = title_word_embedding_layer(sentence_input)
+    droped_vecs = Dropout(0.2)(word_vecs)
+    word_rep = LNEG(20,20)([droped_vecs, droped_vecs, droped_vecs, mask])
+    droped_rep = Dropout(0.2)(word_rep)
+    interest_vec = AttentivePooling(MAX_ENT,400)(droped_rep)
+    
+    vec = Dense(50)(interest_vec)
+    
+    vec = keras.layers.RepeatVector(MAX_CLICK)(vec)
+    
+    sentEncodert = Model(sentence_input, vec)
+    return sentEncodert
 
 def get_user_encoder():
     user_vecs_input = Input(shape=(MAX_CLICK,400))#(?, 50, 400)
@@ -325,6 +431,8 @@ def get_user_encoder():
     user_vecs = Attention(20,20)([user_vecs]*3)#(?, ?, 400)
 
 
+    
+    
     vert_input = Lambda(lambda x:x[:,:,MAX_TITLE:MAX_TITLE+1])(user_input) #(bz,50,1,)
     vert_embedding_layer = Embedding(101, 300,trainable=True)
     vert_vecs = vert_embedding_layer(vert_input)
@@ -337,14 +445,11 @@ def get_user_encoder():
     
     user_vec1 = Concatenate(axis=-1)([user_vecs,vert_vec])
     
-
-    user_vec = user_vec1#AttentivePooling(MAX_CLICK,500)(user_vec1)
-
+    user_vec = user_vec1
     user_vec = Dense(370)(user_vec)
 
+    
     return Model([user_vecs_input,user_input], user_vec)
-
-
 
 def get_flaten_user_encoder(title_word_embedding_matrix,category_dict,subcategory_dict):
     user_vecs_input = Input(shape=(MAX_CLICK,MAX_TITLE+2+MAX_CONTENT+MAX_ENTITY))    
@@ -386,7 +491,7 @@ def get_flaten_user_encoder(title_word_embedding_matrix,category_dict,subcategor
     user_vec1 = Dropout(0.2)(user_vecs)
     
 
-    user_vec = user_vec1#AttentivePooling(MAX_CLICK,40)(user_vec1)
+    user_vec = user_vec1
     
 
     user_vec = Dense(30)(user_vec)
@@ -400,17 +505,27 @@ def create_model(title_word_embedding_matrix,content_word_embedding_matrix,entit
     news_encoder = get_news_encoder(title_word_embedding_matrix,content_word_embedding_matrix,entity_dict,category_dict,subcategory_dict)
     user_encoder1 = get_user_encoder()
     flaten_user_encoder = get_flaten_user_encoder(title_word_embedding_matrix,category_dict,subcategory_dict)
+    user_encoder_inter = get_user_encoder_inter(title_word_embedding_matrix,category_dict)
+    entity_encoder_inter = get_entity_encoder_inter(title_word_embedding_matrix,category_dict, mask)
     
     clicked_title_input = Input(shape=(MAX_CLICK,MAX_TITLE+2+MAX_CONTENT+MAX_ENTITY,), dtype='int32')    
     title_inputs = Input(shape=(1+npratio,MAX_TITLE+2+MAX_CONTENT+MAX_ENTITY,),dtype='int32')
+    user_interest = Input(shape=(MAX_INTER,), dtype='float32')
+    entity_interest = Input(shape=(MAX_ENT,), dtype='float32')
+    mask = Input(shape=(MAX_ENT, MAX_ENT,), dtype='float32')
 
     user_vecs = TimeDistributed(news_encoder)(clicked_title_input)
 
     
     user_vec1 = user_encoder1([user_vecs,clicked_title_input])
     user_vec2 = flaten_user_encoder(clicked_title_input)
+    
+    ulevel_inter = user_encoder_inter(user_interest)
+    elevel_inter = entity_encoder_inter([entity_interest, mask])
 
-    user_vec = Concatenate(axis=-1)([user_vec1,user_vec2])#(?, 400)
+    
+    user_vec = Concatenate(axis=-1)([user_vec1,user_vec2,ulevel_inter,elevel_inter])#(?, 400)
+    user_vec = Dense(400)(user_vec)
 
 
     
@@ -426,9 +541,9 @@ def create_model(title_word_embedding_matrix,content_word_embedding_matrix,entit
     logits = keras.layers.Activation(keras.activations.softmax,name = 'recommend')(scores1)
     logits1 = keras.layers.Activation(keras.activations.softmax,name = 'recommend1')(scores)
 
-    model = Model([title_inputs, clicked_title_input,], [logits,logits1])
-    
-    user_encoder = Model(clicked_title_input,user_vec)
+    model = Model([title_inputs, clicked_title_input,user_interest,entity_interest,mask], [logits,logits1])
+
+    user_encoder = Model([clicked_title_input,user_interest,entity_interest,mask],user_vec)
 
     model = multi_gpu_model(model,gpus=2)
 
@@ -438,7 +553,7 @@ def create_model(title_word_embedding_matrix,content_word_embedding_matrix,entit
                     #optimizer= SGD(lr=0.01),
                     metrics=['acc'])
 
-    return model,news_encoder,user_encoder
+    return model,news_encoder,user_encoder, user_encoder_inter, entity_encoder_inter
 
 def create_model_cg(title_word_embedding_matrix,content_word_embedding_matrix,entity_dict,category_dict,subcategory_dict):
         
@@ -480,6 +595,7 @@ def create_model_fg(title_word_embedding_matrix,content_word_embedding_matrix,en
 
     clicked_title_input = Input(shape=(MAX_CLICK,MAX_TITLE+2+MAX_CONTENT+MAX_ENTITY,), dtype='int32')    
     title_inputs = Input(shape=(1+npratio,MAX_TITLE+2+MAX_CONTENT+MAX_ENTITY,),dtype='int32') 
+    
     
     news_vecs = TimeDistributed(news_encoder)(title_inputs)
     news_vecs = Dropout(0.2)(news_vecs)
