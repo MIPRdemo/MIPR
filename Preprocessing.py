@@ -3,9 +3,6 @@ from Utils import *
 from nltk.tokenize import word_tokenize
 import json
 
-
-
-
 def read_news(data_root_path):
     
     news={}
@@ -75,7 +72,7 @@ def read_news(data_root_path):
             if not subvert in subcategory_dict:
                 subcategory_dict[subvert] = subcategory_index
                 subcategory_index += 1
-
+#     import pdb;pdb.set_trace()
     for word in content_count:
         if content_count[word]<3:
             continue
@@ -83,10 +80,6 @@ def read_news(data_root_path):
         content_index += 1
         
     return news,news_index,category_dict,subcategory_dict,word_dict,content_dict,entity_dict
-
-
-
-
 
 
 def get_doc_input(news,news_index,category_dict,subcategory_dict,word_dict,content_dict,entity_dict):
@@ -117,7 +110,11 @@ def get_doc_input(news,news_index,category_dict,subcategory_dict,word_dict,conte
 
     return news_title,news_vert,news_subvert,news_entity,news_content
 
-
+def get_interest():
+    user_inter = np.load("user_interest.npy")
+    entity_inter = np.load("entity_inter.npy")
+    mask = np.load("mask.npy")
+    return user_inter, entity_inter, mask
 
 def read_train_clickhistory(news_index,data_root_path,filename):
     
@@ -126,7 +123,14 @@ def read_train_clickhistory(news_index,data_root_path,filename):
         lines = f.readlines()
         
     sessions = []
+    interest, entity_interest, mask = get_interest()
+    interest = interest[:len(lines)]
+    entity_interest = entity_interest[:len(lines)]
+    masks = masks[:len(lines)]
     for i in range(len(lines)):
+        inter = interest[i]
+        entity_inter = entity_interest[i]
+        mask = masks[i]
         _,uid,eventime, click, imps = lines[i].strip().split('\t')
         if click == '':
             clikcs = []
@@ -145,10 +149,8 @@ def read_train_clickhistory(news_index,data_root_path,filename):
                 pos.append(docid)
             else:
                 neg.append(docid)
-        sessions.append([true_click,pos,neg])
+        sessions.append([true_click,pos,neg, inter, entity_inter, mask])
     return sessions
-
-
 
 
 def read_test_clickhistory_noclk(news_index,data_root_path,filename):
@@ -157,8 +159,12 @@ def read_test_clickhistory_noclk(news_index,data_root_path,filename):
     with open(os.path.join(data_root_path,filename)) as f:
         lines = f.readlines()
     sessions = []
+    interest, entity_interest = get_interest()
+    interest = interest[-len(lines):]
+    entity_interest = entity_interest[-len(lines):]
     for i in range(len(lines)):
-
+        inter = interest[i]
+        entity_inter = entity_interest[i]
         try:
             _,uid,eventime, click, imps = lines[i].strip().split('\t')
         except:
@@ -180,7 +186,7 @@ def read_test_clickhistory_noclk(news_index,data_root_path,filename):
                 pos.append(docid)
             else:
                 neg.append(docid)
-        sessions.append([true_click,pos,neg])
+        sessions.append([true_click,pos,neg, inter, entity_inter])
     return sessions
 
 
@@ -189,7 +195,7 @@ def parse_user(news_index,session):
     user={'click': np.zeros((user_num,MAX_CLICK),dtype='int32'),}
     for user_id in range(len(session)):
         tclick = []
-        click, pos, neg =session[user_id]
+        click, pos, neg,_,_ =session[user_id]
         for i in range(len(click)):
             tclick.append(news_index[click[i]])
         click = tclick
@@ -207,16 +213,22 @@ def get_train_input(news_index,session):
     sess_pos = []
     sess_neg = []
     user_id = []
+    user_inter = []
+    entity_inter = []
+    mask = []
     for sess_id in range(len(session)):
         sess = session[sess_id]
-        _, poss, negs=sess
+        _, poss, negs, inter, e_inter, m =sess
         for i in range(len(poss)):
             pos = poss[i]
             neg=newsample(negs,npratio)
             sess_pos.append(pos)
             sess_neg.append(neg)
             user_id.append(sess_id)
-
+            user_inter.append(inter)
+            entity_inter.append(e_inter)
+            mask.append(m)
+            
     sess_all = np.zeros((len(sess_pos),1+npratio),dtype='int32')
     label = np.zeros((len(sess_pos),1+npratio))
     for sess_id in range(sess_all.shape[0]):
@@ -229,16 +241,18 @@ def get_train_input(news_index,session):
             index+=1
         label[sess_id,0]=1
     user_id = np.array(user_id, dtype='int32')
-
+#     import pdb;pdb.set_trace()
     
-    return sess_all, user_id, label
+    return sess_all, user_id, user_inter, entity_inter, mask, label
 
 def get_test_input(news_index,session):
     
     Impressions = []
     userid = []
+    user_inter = []
+    entity_inter = []
     for sess_id in range(len(session)):
-        _, poss, negs = session[sess_id]
+        _, poss, negs, inter, e_inter = session[sess_id]
         imp = {'labels':[],
                 'docs':[]}
         userid.append(sess_id)
@@ -246,12 +260,16 @@ def get_test_input(news_index,session):
             docid = news_index[poss[i].split("-")[0]]
             imp['docs'].append(docid)
             imp['labels'].append(1)
+            user_inter.append(inter)
+            entity_inter.append(e_inter)
         for i in range(len(negs)):
             docid = news_index[negs[i].split("-")[0]]
             imp['docs'].append(docid)
             imp['labels'].append(0)
+            user_inter.append(inter)
+            entity_inter.append(e_inter)
         Impressions.append(imp)
         
     userid = np.array(userid,dtype='int32')
     
-    return Impressions, userid,
+    return Impressions, userid, user_inter, entity_inter,
