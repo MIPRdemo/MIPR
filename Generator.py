@@ -33,14 +33,16 @@ class NewsFetcher():
 
 
 class get_hir_train_generator(Sequence):
-    def __init__(self,news_fetcher,clicked_news,user_id, news_id, label, batch_size):
+    def __init__(self,news_fetcher,clicked_news,user_id, user_interest, entity_interest, news_id, label, batch_size):
         self.news_fetcher = news_fetcher
         self.clicked_news = clicked_news
 
         self.user_id = user_id
         self.doc_id = news_id
         self.label = label
-
+        self.user_interest = np.array(user_interest)
+        
+        self.entity_interest = np.array(entity_interest)
         
         self.batch_size = batch_size
         self.ImpNum = self.label.shape[0]
@@ -50,7 +52,9 @@ class get_hir_train_generator(Sequence):
         self.temp1 = np.expand_dims(self.temp1, axis=1)
         self.temp2 = np.expand_dims(self.temp2, axis=2)
         self.interest_label = np.where(self.temp2 == self.temp1, 1, 0)#(232567, 50)
-
+#         self.interest_label[:,1:,:] = 0
+#         import pdb;pdb.set_trace()
+        
         
         
     def __len__(self):
@@ -65,6 +69,9 @@ class get_hir_train_generator(Sequence):
         label = self.label[start:ed]
         interest_label = self.interest_label[start:ed]
         
+        user_interest = self.user_interest[start:ed]
+        entity_interest = self.entity_interest[start:ed]
+        
         doc_ids = self.doc_id[start:ed]
         info= self.news_fetcher.fetch(doc_ids)
         
@@ -74,16 +81,18 @@ class get_hir_train_generator(Sequence):
         
         click_mask = clicked_ids>0
         click_mask = np.array(click_mask,dtype='float32')
+#         return ([info, user_info],label)
 
-
-        return ([info, user_info],[label,interest_label])
+        return ([info, user_info, user_interest, entity_interest],[label,interest_label])
 
 
 class get_hir_user_generator(Sequence):
-    def __init__(self,news_fetcher,clicked_news,batch_size):
+    def __init__(self,news_fetcher,user_interest,clicked_news,batch_size):
         self.news_fetcher = news_fetcher
 
         self.clicked_news = clicked_news
+        
+        self.user_interest = user_interest
 
         self.batch_size = batch_size
         self.ImpNum = self.clicked_news.shape[0]
@@ -96,11 +105,12 @@ class get_hir_user_generator(Sequence):
         ed = (idx+1)*self.batch_size
         if ed> self.ImpNum:
             ed = self.ImpNum
+        user_interest = self.user_interest[start:ed]
             
         clicked_ids = self.clicked_news[start:ed]
         user_info = self.news_fetcher.fetch(clicked_ids)
         
-        return user_info
+        return [user_info,user_interest,]
 
 
 class get_hir_news_generator(Sequence):
