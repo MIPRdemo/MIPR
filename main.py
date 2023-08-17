@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
 
 import tensorflow as tf
 import keras.backend.tensorflow_backend as KTF
@@ -43,8 +43,6 @@ import nltk
 data_root_path = "newsRec/MIND-small"
 embedding_path = ""
 
-
-
 news,news_index,category_dict,subcategory_dict,word_dict,content_dict,entity_dict = read_news(data_root_path)
 news_title,news_vert,news_subvert,news_entity,news_content=get_doc_input(news,news_index,category_dict,subcategory_dict,word_dict,content_dict,entity_dict)
 
@@ -53,23 +51,27 @@ content_word_embedding_matrix, have_word = load_matrix(embedding_path,content_di
 
 train_session = read_train_clickhistory(news_index,data_root_path,'train/behaviors.tsv')
 train_user = parse_user(news_index,train_session)
-train_sess, train_user_id, train_label = get_train_input(news_index,train_session)
+train_sess, train_user_id, train_user_interest, train_entity_interest, mask, train_label = get_train_input(news_index,train_session)
 
 news_fetcher = NewsFetcher(news_title,news_content,news_vert,news_subvert,news_entity)
 
 test_session = read_test_clickhistory_noclk(news_index,data_root_path,'test/behaviors.tsv')
 # test_session = read_test_clickhistory(news_index,data_root_path,'test/behaviors.tsv')
 test_user = parse_user(news_index,test_session)
-test_impressions, test_userids = get_test_input(news_index,test_session)
+test_impressions, test_userids, test_user_interest, test_entity_interest = get_test_input(news_index,test_session)
 
-train_generator = get_hir_train_generator(news_fetcher,train_user['click'],train_user_id,train_sess,train_label,32)
+train_generator = get_hir_train_generator(news_fetcher,train_user['click'],train_user_id,train_user_interest, train_entity_interest, mask, train_sess,train_label,32)
 news_generator = get_hir_news_generator(news_fetcher,32)
 
-model,news_encoder,user_encoder, = create_model(title_word_embedding_matrix,content_word_embedding_matrix,entity_dict,category_dict,subcategory_dict)
+model,news_encoder,user_encoder, user_encoder_inter, entity_encoder_inter = create_model(title_word_embedding_matrix,content_word_embedding_matrix,entity_dict,category_dict,subcategory_dict)
 model.fit_generator(train_generator,epochs=3,verbose=1)
 
+test_user_interest = np.array(test_user_interest)
+# test_user_interest = user_encoder_inter.predict(test_user_interest,verbose=1)
+
+
 news_scoring = news_encoder.predict_generator(news_generator,verbose=1)
-test_user_generator = get_hir_user_generator(news_fetcher,test_user['click'],32)
+test_user_generator = get_hir_user_generator(news_fetcher,test_user_interest,test_user['click'],32)
 test_user_scoring = user_encoder.predict_generator(test_user_generator,verbose=1)
 # dump_result(test_impressions,news_scoring,test_user_scoring)
 AUC, MRR, nDCG5, nDCG10 = evaluate(test_impressions,news_scoring,test_user_scoring)
