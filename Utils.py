@@ -87,7 +87,7 @@ def evaluate(test_impressions,news_scoring,user_scoring):
         uv = user_scoring[i]
 
         nvs = news_scoring[nids]
-
+#         score = np.dot(nvs,uv)
         score = np.dot(nvs,uv.T)
         score = np.mean(score, axis=1)
 
